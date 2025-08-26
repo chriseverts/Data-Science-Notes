@@ -447,6 +447,9 @@ class FleetHealthTracker:
         # Apply inactivity detection
         self.detect_inactivity()
 
+        # Compute global time gaps across entire dataset for chart logic
+        self.compute_global_time_gaps()
+
         # Calculate health score components
         health_scores = self.df.apply(self.calculate_health_score_components, axis=1)
 
@@ -486,6 +489,17 @@ class FleetHealthTracker:
 
         print(f"Health scores calculated. Average: {self.df['Total_Health_Score'].mean():.1f}")
 
+    def compute_global_time_gaps(self):
+        """Compute time gaps across entire dataset ordered by Timestamp.
+        This complements per-stage gaps so charts can detect ≥24h gaps globally.
+        """
+        if 'Timestamp' not in self.df.columns:
+            return
+        self.df = self.df.sort_values('Timestamp').copy()
+        diffs = self.df['Timestamp'].diff()
+        self.df['Global_Time_Gap_Hours'] = diffs.dt.total_seconds() / 3600
+        self.df['Global_Time_Gap_Hours'] = self.df['Global_Time_Gap_Hours'].fillna(0)
+
     def create_health_trend_line_graph(self):
         """Create line graph showing health trends with per-day drop-to-zero on large gaps"""
         print("Creating health trend line graph...")
@@ -505,9 +519,16 @@ class FleetHealthTracker:
             print("No daily health data to plot")
             return
 
-        # Detect large-gap days and zero-out for plotting if enabled
-        if 'Time_Gap_Hours' in daily.columns:
-            gap_by_day = daily.groupby('Date')['Time_Gap_Hours'].max().fillna(0)
+        # Detect large-gap days (use max of per-stage and global gaps) and zero-out for plotting if enabled
+        if 'Time_Gap_Hours' in daily.columns or 'Global_Time_Gap_Hours' in daily.columns:
+            # Combine both gap metrics where available
+            if 'Time_Gap_Hours' in daily.columns and 'Global_Time_Gap_Hours' in daily.columns:
+                daily['Combined_Time_Gap_Hours'] = daily[['Time_Gap_Hours', 'Global_Time_Gap_Hours']].max(axis=1)
+            elif 'Time_Gap_Hours' in daily.columns:
+                daily['Combined_Time_Gap_Hours'] = daily['Time_Gap_Hours']
+            else:
+                daily['Combined_Time_Gap_Hours'] = daily['Global_Time_Gap_Hours']
+            gap_by_day = daily.groupby('Date')['Combined_Time_Gap_Hours'].max().fillna(0)
         else:
             gap_by_day = pd.Series(0, index=daily_health.index)
 
@@ -589,8 +610,14 @@ Drop-to-Zero Gap (Chart): {self.inactivity_params.get('graph_gap_hours', 24.0)}h
             'Is_Inactive': 'sum'
         })
 
-        if 'Time_Gap_Hours' in daily.columns:
-            gap_by_day = daily.groupby('Date')['Time_Gap_Hours'].max().fillna(0)
+        if 'Time_Gap_Hours' in daily.columns or 'Global_Time_Gap_Hours' in daily.columns:
+            if 'Time_Gap_Hours' in daily.columns and 'Global_Time_Gap_Hours' in daily.columns:
+                daily['Combined_Time_Gap_Hours'] = daily[['Time_Gap_Hours', 'Global_Time_Gap_Hours']].max(axis=1)
+            elif 'Time_Gap_Hours' in daily.columns:
+                daily['Combined_Time_Gap_Hours'] = daily['Time_Gap_Hours']
+            else:
+                daily['Combined_Time_Gap_Hours'] = daily['Global_Time_Gap_Hours']
+            gap_by_day = daily.groupby('Date')['Combined_Time_Gap_Hours'].max().fillna(0)
         else:
             gap_by_day = pd.Series(0, index=daily_health.index)
 
@@ -650,12 +677,21 @@ Drop-to-Zero Gap (Chart): {self.inactivity_params.get('graph_gap_hours', 24.0)}h
         avg_health = self.df['Total_Health_Score'].mean()
 
         # Count days with large gaps for dashboard summary
-        if 'Time_Gap_Hours' in self.df.columns:
-            tmp_daily = self.df.copy()
+        tmp_daily = self.df.copy()
+        if 'Timestamp' in tmp_daily.columns:
             tmp_daily['Date'] = tmp_daily['Timestamp'].dt.date
+            # Use combined metric if available
+            if 'Time_Gap_Hours' in tmp_daily.columns and 'Global_Time_Gap_Hours' in tmp_daily.columns:
+                tmp_daily['Combined_Time_Gap_Hours'] = tmp_daily[['Time_Gap_Hours', 'Global_Time_Gap_Hours']].max(axis=1)
+            elif 'Time_Gap_Hours' in tmp_daily.columns:
+                tmp_daily['Combined_Time_Gap_Hours'] = tmp_daily['Time_Gap_Hours']
+            elif 'Global_Time_Gap_Hours' in tmp_daily.columns:
+                tmp_daily['Combined_Time_Gap_Hours'] = tmp_daily['Global_Time_Gap_Hours']
+            else:
+                tmp_daily['Combined_Time_Gap_Hours'] = 0
             lg_threshold = float(self.inactivity_params.get('graph_gap_hours', 24.0))
             days_with_large_gaps = (
-                tmp_daily.groupby('Date')['Time_Gap_Hours'].max().fillna(0) >= lg_threshold
+                tmp_daily.groupby('Date')['Combined_Time_Gap_Hours'].max().fillna(0) >= lg_threshold
             ).sum()
         else:
             days_with_large_gaps = 0
